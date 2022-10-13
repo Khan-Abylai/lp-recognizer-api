@@ -1,0 +1,35 @@
+version: '3'
+services:
+  api:
+    container_name: recognizer_api
+    image: doc.smartparking.kz/lp_recognizer_api:0.0.1.2.22.2
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_VISIBLE_DEVICES=1
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    restart: always
+    runtime: nvidia
+    ports:
+      - "9001:9001"
+    devices:
+      - /dev/nvidia0
+      - /dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools
+      - /dev/nvidiactl
+    logging:
+      options:
+        max-size: 50m
+    volumes:
+      - ~/.ssh:/home/nsagitzhan/.ssh:ro
+#  telegram:
+#    container_name: telegram
+#    image: doc.smartparking.kz/lp_recognizer_bot:0.0.1.2.22.1
+#    environment:
+#      - LANG=C.UTF-8
+#      - LC_ALL=C.UTF-8
+#    restart: always
+#    ipc: host
+#    logging:
+#      options:
+#        max-size: 50m
