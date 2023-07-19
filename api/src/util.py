@@ -5,7 +5,7 @@ import constants
 from PIL import Image
 
 
-def prepare_for_detector(image_orig):
+def prepare_for_detector_UAE(image_orig):
     s = max(image_orig.shape[0:2])
     f = np.zeros((s, s, 3), np.uint8)
     # ax, ay = (s - image_orig.shape[1]) // 2, (s - image_orig.shape[0]) // 2
@@ -20,6 +20,23 @@ def prepare_for_detector(image_orig):
     x = np.ascontiguousarray(x)
 
     return image_orig, x
+
+def prepare_for_detector(image_orig):
+    h, w, _ = image_orig.shape
+    if h > w:
+        s = max(image_orig.shape[0:2])
+        f = np.zeros((s, s, 3), np.uint8)
+        ax, ay = (s - image_orig.shape[1]) // 2, (s - image_orig.shape[0]) // 2
+        f[ay:image_orig.shape[0] + ay, ax:ax + image_orig.shape[1]] = image_orig
+        resized_image = cv2.resize(f.copy(), (DETECTION_IMAGE_W, DETECTION_IMAGE_H))
+    else:
+        ax, ay = 0, 0
+        resized_image = cv2.resize(image_orig, (DETECTION_IMAGE_W, DETECTION_IMAGE_H))
+    resized_image = resized_image.transpose((2, 0, 1))
+    resized_image = 2 * (resized_image / 255.0 - 0.5)
+    x = resized_image.astype(np.float32)
+    x = np.ascontiguousarray(x)
+    return image_orig, x, ax, ay
 
 def bbox_iou_np(box1, box2, x1y1x2y2=True):
     if not x1y1x2y2:
@@ -72,30 +89,50 @@ def nms_np(predictions, conf_thres=0.2, nms_thres=0.2, include_conf=False):
     return np.stack(output)
 
 
-def preprocess_image_recognizer(img, box):
+def preprocess_image_recognizer_UAE(img, box):
     is_squared = False
     plate_imgs = []
     ratio = abs((box[4, 0] - box[3, 0]) / (box[3, 1] - box[2, 1]))
     if 2.6 >= ratio >= 0.8:
         plate_img = cv2.warpPerspective(img, cv2.getPerspectiveTransform(box[2:], constants.PLATE_SQUARE),
-                                        (constants.RECOGNIZER_IMAGE_W // 2, constants.RECOGNIZER_IMAGE_H * 2))
+                                        (constants.EXTENDED_RECOGNIZER_IMAGE_WIDTH // 2, constants.EXTENDED_RECOGNIZER_IMAGE_HEIGHT * 2))
 
-        padding = np.ones((constants.RECOGNIZER_IMAGE_H,
-                           constants.RECOGNIZER_IMAGE_W // 2, 3), dtype=np.uint8) * constants.PIXEL_MAX_VALUE
+        padding = np.ones((constants.EXTENDED_RECOGNIZER_IMAGE_HEIGHT,
+                           constants.EXTENDED_RECOGNIZER_IMAGE_WIDTH // 2, 3), dtype=np.uint8) * constants.PIXEL_MAX_VALUE
 
-        first_half = np.concatenate((plate_img[:constants.RECOGNIZER_IMAGE_H], padding), axis=1).astype(
+        first_half = np.concatenate((plate_img[:constants.EXTENDED_RECOGNIZER_IMAGE_HEIGHT], padding), axis=1).astype(
             np.uint8)
-        second_half = np.concatenate((plate_img[constants.RECOGNIZER_IMAGE_H:], padding), axis=1).astype(
+        second_half = np.concatenate((plate_img[constants.EXTENDED_RECOGNIZER_IMAGE_HEIGHT:], padding), axis=1).astype(
             np.uint8)
         plate_imgs.append(first_half)
         plate_imgs.append(second_half)
         is_squared = True
     else:
         plate_img = cv2.warpPerspective(img, cv2.getPerspectiveTransform(box[2:], constants.PLATE_RECT),
-                                        (constants.RECOGNIZER_IMAGE_W, constants.RECOGNIZER_IMAGE_H))
+                                        (constants.EXTENDED_RECOGNIZER_IMAGE_WIDTH, constants.EXTENDED_RECOGNIZER_IMAGE_HEIGHT))
         plate_imgs.append(plate_img)
         is_squared = False
     return np.ascontiguousarray(
         np.stack(plate_imgs).astype(np.float32).transpose(
-                constants.RECOGNIZER_IMG_CONFIGURATION) / constants.PIXEL_MAX_VALUE), is_squared
+                constants.RECOGNIZER_IMG_CONFIGURATION) / constants.PIXEL_MAX_VALUE), is_squared, plate_img
 
+def preprocess_image_recognizer(img, box):
+    lt = box[2]
+    lb = box[3]
+    rt = box[4]
+    rb = box[5]
+    w = ((rt[0] - lt[0]) + (rb[0] - lb[0])) / 2
+    h = ((lb[1] - lt[1]) + (rb[1] - rt[1])) / 2
+    ratio = w / h
+    if ratio <= 2.6:
+        plate_img = cv2.warpPerspective(img, cv2.getPerspectiveTransform(box[2:], constants.PLATE_SQUARE),
+                                        (constants.RECOGNIZER_IMAGE_W // 2, constants.RECOGNIZER_IMAGE_H * 2))
+        # plate_true = cv2.warpPerspective(img, cv2.getPerspectiveTransform(box[2:], constants.PLATE_SQUARE))
+        top = plate_img[:32, :]
+        bottom = plate_img[32:, :]
+        plate_img = hconcat_resize_min([top, bottom])
+    else:
+        plate_img = cv2.warpPerspective(img, cv2.getPerspectiveTransform(box[2:], constants.PLATE_RECT),
+                                        (constants.RECOGNIZER_IMAGE_W, constants.RECOGNIZER_IMAGE_H))
+    return np.ascontiguousarray(np.stack([plate_img]).astype(np.float32).transpose(
+        constants.RECOGNIZER_IMG_CONFIGURATION) / constants.PIXEL_MAX_VALUE), plate_img

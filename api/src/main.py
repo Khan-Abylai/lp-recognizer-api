@@ -4,6 +4,7 @@ from fastapi import FastAPI, Response
 from fastapi import Request, File
 import paramiko
 from fastapi.responses import StreamingResponse
+import json
 
 import time
 from detection_service import DetectionEngine
@@ -12,14 +13,14 @@ from util import prepare_for_detector, nms_np, preprocess_image_recognizer
 from template_matching import TemplateMatching
 from constants import DETECTION_IMAGE_H, DETECTION_IMAGE_W
 from datetime import datetime
-
+import base64
 
 app = FastAPI()
 detector = DetectionEngine()
 recognizer = RecognitionEngine()
 template_matcher = TemplateMatching()
 
-def getPlates(image, img_orig, img_model):
+def getPlates_UAE(image, img_orig, img_model):
     plate_output = detector.predict(img_model)
     plates = nms_np(plate_output[0], conf_thres=0.7, include_conf=True)
     height_orig, width_orig, _ = image.shape
@@ -35,14 +36,36 @@ def getPlates(image, img_orig, img_model):
         for i in range(6):
             box[i, 0] = box[i, 0]*ratio_width
             box[i, 1] = box[i, 1]*ratio_height
-        plate_img, is_squared = preprocess_image_recognizer(image, box)
-        plate_labels, probs, country_code = recognizer.predict(plate_img)
+        plate_img, is_squared, plate_true = preprocess_image_recognizer(image, box)
+        # plate_labels, probs, country_code = recognizer.predict(plate_img)
+        plate_labels, probs = recognizer.predict(plate_img)
         if is_squared:
             plate_label, country_code = template_matcher.process_square_lp(plate_labels[0], plate_labels[1])
             prob = probs[0]*probs[1]
-            return [plate_label], [prob], country_code
+            return [plate_label], [prob], plate_true#, country_code
         else:
-            return plate_labels, probs, country_code
+            return plate_labels, probs, plate_true#, country_code
+    else:
+        return None, None, None
+
+def getPlates(img_orig, img_model, ax, ay):
+    original_image_h, original_image_w, _ = img_orig.shape
+    plate_output = detector.predict(img_model)
+    plates = nms_np(plate_output[0], conf_thres=0.7, include_conf=True)
+    if len(plates) > 0:
+        plates[..., [4, 6, 8, 10]] += plates[..., [0]]
+        plates[..., [5, 7, 9, 11]] += plates[..., [1]]
+        ind = np.argsort(plates[..., -1])
+        plates = plates[ind]
+        plate = plates[0]
+        box = np.copy(plate[:12]).reshape(6, 2)
+        box[:, ::2] *= (original_image_w + ax * 2) / DETECTION_IMAGE_W
+        box[:, 1::2] *= (original_image_h + ay * 2) / DETECTION_IMAGE_H
+        box[:, ::2] -= ax
+        box[:, 1::2] -= ay
+        plate_img, plate_true = preprocess_image_recognizer(img_orig, box)
+        plate_labels, probs = recognizer.predict(plate_img)
+        return plate_labels, probs, plate_true
     else:
         return None, None, None
 
@@ -57,86 +80,115 @@ def readb64(uri):
 async def main():
     return {"success": True}
 
-
+##TODO ANOTHER endpoint for uae
 @app.post("/api/image_test")
 async def analyze_route(request: Request):
     form = await request.form()
-    try:
-        t1 = time.time()
-        images = []
-        results = []
-        label_bool = False
-        # upload_file = form["image"]
-        # filename = form["image"].filename  # str
-        for i in range(5):
-            try:
-                name = f"image_{i}"
-                # name = "image_0"
-                images = await form[name].read()
-            except Exception:
-                break
-        # for i in range(len(images)):
-            try:
-                image_base64 = images # bytes
-                # content_type = form["image"].content_type  # str
-                image = readb64(image_base64)
-                img_orig, img_model = prepare_for_detector(image)
+    # try:
+    t1 = time.time()
+    images = []
+    results = []
+    label_bool = False
+    # upload_file = form["image"]
+    # filename = form["image"].filename  # str
+    initial_sizes = json.loads(form["json"])
+    content = request.headers.get("content-disposition", None)
+    print("HERE")
+    print(content)
+    for i in range(5):
+        try:
+            initial_size = initial_sizes["images"][i]
+        except:
+            break
+        try:
+            name = f"image_{i}"
+            # name = "image_0"
+            images = await form[name].read()
+        except Exception:
+            break
+        try:
+            image_base64 = images # bytes
+            image = readb64(image_base64)
+            height = initial_size["base_size"]["height"]
+            width = initial_size["base_size"]["width"]
+            image_bordered = cv2.copyMakeBorder(src=image, top=0, bottom=height, left=0, right=width,
+                                                borderType=cv2.BORDER_CONSTANT)
+            # if image.shape[0] < 512 or image.shape[1] < 512:
+            #     height = 512 - image.shape[0]
+            #     width = 512 - image.shape[1]
+            #     if width < 0:
+            #         width = 0
+            #     if height < 0:
+            #         height = 0
+            #     image_bordered = cv2.copyMakeBorder(src=image, top=0, bottom=height, left=0, right=width,
+            #                                         borderType=cv2.BORDER_CONSTANT)
+            img_orig, img_model, ax, ay = prepare_for_detector(image)
+            label_bool = None
+        except:
+            results.append({"status": False, "message": "incorrect_image"})
+            continue
+        label, probs, plate_true = getPlates(img_orig, img_model, ax, ay)
+        try:
+            _, im_arr = cv2.imencode('.jpg', plate_true)  # im_arr: image in Numpy one-dim array format.
+            im_bytes = im_arr.tobytes()
+            plate_img64 = base64.b64encode(im_bytes)
+        except:
+            results.append({"status": False, "message": "empty_image"})
+            continue
+        t2 = time.time()
+        process_time = t2 - t1
+        if label is None:
+            results.append({"status": False, "message": "no_plate_in_image"})
+        else:
+            results.append({"status": True, "label": label, "prob": probs,
+                            "exec_time": process_time, "plate": plate_img64})
+    print(results)
 
-                label_bool = None
-            except:
-                results.append({"status": False, "message": "incorrect image"})
-                continue
-            label, probs, country_code = getPlates(image, img_orig, img_model)
-            t2 = time.time()
-            process_time = t2 - t1
-            if label is None:
-                results.append({"status": False, "message": "no plate in image"})
-            else:
-                # label_bool = True
-                results.append({"status": True, "label": label, "prob": probs, "country_code": country_code,
-                                "exec_time": process_time})
-        # if label_bool is False:
-        #     print(f"status: {False}, message: no plate in image")
-        #     return {"status": False, "message": "no plate in image"}
-        # else:
-        #     print(f"status: {True}, label: {label}, prob: {probs}, country_code: {country_code},"
-        #           f"exec_time: {process_time}")
-        print(results)
-        return results
-    except Exception as e:
-        print(f"state: {False}, message: unknown error")
-        return {"status": False, "message": "unknown error", "body": request.body, "head": request.headers}
+    return results
+    # except Exception as e:
+    #     # print(f"state: {False}, message: unknown error")
+    #     return {"status": False, "message": "unknown_error", "body": request.body, "head": request.headers}
 
 @app.post("/api/image")
 async def analyze_route(request: Request):
     form = await request.form()
-    try:
-        if "image" in form:
-            t1 = time.time()
-            # upload_file = form["image"]
-            # filename = form["image"].filename  # str
-            try:
-                image_base64 = await form["image"].read()  # bytes
-                # content_type = form["image"].content_type  # str
-                image = readb64(image_base64)
-                img_orig, img_model = prepare_for_detector(image)
-            except:
-                return {"status": False, "message": "incorrect image"}
-            label, probs, country_code = getPlates(image, img_orig, img_model)
-            t2 = time.time()
-            process_time = t2-t1
-            if label is None and probs is None:
-                return {"status": False, "message": "no plate in image"}
-            else:
-                print(f"status: {True}, label: {label}, prob: {probs}, country_code: {country_code},"
-                      f"exec_time: {process_time}")
-                return {"status": True, "label": label, "prob": probs, "country_code": country_code,
-                        "exec_time": process_time}
+    # try:
+    if "image" in form:
+        t1 = time.time()
+        try:
+            image_base64 = await form["image"].read()  # bytes
+            image = readb64(image_base64)
+            if image.shape[0] < 512 or image.shape[1] < 512:
+                height = 512 - image.shape[0]
+                width = 512 - image.shape[1]
+                if width < 0:
+                    width = 0
+                if height < 0:
+                    height = 0
+                image_bordered = cv2.copyMakeBorder(src=image, top=0, bottom=height, left=0, right=width,
+                                                    borderType=cv2.BORDER_CONSTANT)
+            img_orig, img_model, ax, ay = prepare_for_detector(image_bordered)
+        except:
+            return {"status": False, "message": "incorrect image"}
+        label, probs, plate_true = getPlates(img_orig, img_model, ax, ay)
+        try:
+            _, im_arr = cv2.imencode('.jpg', plate_true)  # im_arr: image in Numpy one-dim array format.
+            im_bytes = im_arr.tobytes()
+            plate_img64 = base64.b64encode(im_bytes)
+        except:
+            return ({"status": False, "message": "empty_image"})
+        t2 = time.time()
+        process_time = t2-t1
+        if label is None and probs is None:
+            return {"status": False, "message": "no plate in image"}
         else:
-            return {"status": False, "message": "no image in request body",
-                    "body": request.body, "head": request.headers, "form": request.form}
-    except Exception as e:
-        return {"status": False, "message": "unknown error", "body": request.body, "head": request.headers}
+            return {"status": True, "label": label, "prob": probs,
+                    "exec_time": process_time, "plate": plate_img64}
+    else:
+        return {"status": False, "message": "no image in request body",
+                "body": request.body, "head": request.headers, "form": request.form}
+    # except Exception as e:
+    #     return {"status": False, "message": "unknown error", "body": request.body, "head": request.headers}
 
 @app.get("/api/logs_local")
 async def logs_local(start: str = '2022-09-27T16:00:00', finish: str = '2022-09-27T16:30:00',

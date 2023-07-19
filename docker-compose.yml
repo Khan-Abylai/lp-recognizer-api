@@ -13,7 +13,7 @@ services:
     ports:
       - "9001:9001"
     devices:
-      - /dev/nvidia0
+      - /dev/nvidia1
       - /dev/nvidia-uvm
       - /dev/nvidia-uvm-tools
       - /dev/nvidiactl
